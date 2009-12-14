@@ -1,0 +1,256 @@
+#!/bin/bash
+#
+# IPlinux cross-toolchain builder
+#
+
+set -o pipefail
+if [ -n "$DEBUG" ]; then
+    set -x
+fi
+set -e
+
+usage() {
+    echo -e "Usage: $0 [-Btarget] [-Bhost] [--new=<pkg>] <target-arch> ..."
+    echo
+    echo -e "\t-Btarget          Build only arch-dep packages for target"
+    echo -e "\t-Bhost            Build only arch-dep packages for host"
+    echo -e "\t--new=<pkg>       Mark <pkg> as being new (does not need BinNMU bump)"
+    echo
+    echo -e "\t<target-arch>     a Debian architecture string."
+    echo
+}
+
+#
+# Distro
+#
+DISTRO=zelazny
+
+#
+# -- Paths to sources --
+#
+
+SRC_DIR=$(pwd)
+BINUTILS_DIR=$SRC_DIR/binutils-host
+LLD_DIR=$SRC_DIR/linux-libc-dev
+UCLIBC_DIR=$SRC_DIR/uclibc
+GLIBC_DIR=$SRC_DIR/glibc
+GCC_DIR=$SRC_DIR/gcc-4.3
+
+MYARCH=$(dpkg --print-architecture)
+
+DESTDIR=$HOME/__build/repo
+
+# tools #
+
+do_clean() {
+    mkdir -p $DESTDIR
+    rm -f $DESTDIR/*
+    rm -f $SRC_DIR/*.dsc $SRC_DIR/*.tar.gz $SRC_DIR/*.log $SRC_DIR/log-*
+}
+
+do_prepare_pkg() {
+    (cd $1; \
+        DEBFULLNAME='IPlinux Build Robot' \
+        DEBEMAIL='build-robot@iplinux.org' \
+        dch --bin-nmu -D $DISTRO --force-distribution \
+        "Rebuild toolchain$2.")
+}
+
+do_prepare() {
+    if [ "x$NEW_PKG" = all -o -z "$NEW_PKG" ]; then
+        UPD_MSG=''
+    else
+        UPD_MSG=' due to updated $NEW_PKG'
+    fi
+
+    if [ "x$NEW_PKG" != xgcc -a "x$NEW_PKG" != all ]; then
+        do_prepare_pkg "$GCC_DIR" "$UPD_MSG"
+    fi
+
+    if [ "x$NEW_PKG" != glibc -a "x$NEW_PKG" != all ]; then
+        do_prepare_pkg "$GLIBC_DIR" "$UPD_MSG"
+    fi
+}
+
+_cross() {
+    (cd $DESTDIR; dpkg-cross -A -a $TARGET -b "$@")
+}
+
+_repo_update() {
+    (cd $DESTDIR; dpkg-scanpackages . > Packages)
+}
+
+# binutils #
+
+do_binutils() {
+    (cd $BINUTILS_DIR; debian/source/prepare $TARGET)
+    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/binutils-host*dsc host $DESTDIR
+    _repo_update
+}
+
+# linux-libc-dev #
+
+do_lld() {
+    (cd $SRC_DIR; dpkg-source -b linux-libc-dev)
+    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/linux-libc-dev_*.dsc target:$TARGET $DESTDIR
+    _cross $DESTDIR/linux-libc-dev_*.deb
+    _repo_update
+}
+
+# glibc #
+
+_do_glibc() {
+    (cd $GLIBC_DIR; debian/source/prepare $1)
+    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/glibc*dsc target:$TARGET $DESTDIR
+}
+
+do_bs1_glibc() {
+    _do_glibc dev-headers
+    _cross $DESTDIR/libc6-dev-headers_*.deb
+    _repo_update
+}
+do_bs2_glibc() {
+    _do_glibc bootstrap
+    _cross $DESTDIR/libc6_*.deb $DESTDIR/libc6-dev_*.deb
+    _repo_update
+}
+
+do_glibc() {
+    _do_glibc final
+    _cross $DESTDIR/gconv-data-*.deb $DESTDIR/libc6-dbg_*.deb $DESTDIR/libc6-dev_*.deb $DESTDIR/libc6-iconv_*.deb $DESTDIR/libc6-rpc_*.deb $DESTDIR/libc6-tz_*.deb $DESTDIR/libc6-utils_*.deb $DESTDIR/libc6_*.deb $DESTDIR/locales_*.deb
+    _repo_update
+}
+
+# gcc #
+
+_do_gcc() {
+    (cd $GCC_DIR; debian/source/prepare $TARGET $1)
+    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/gcc-*_*.dsc host $DESTDIR
+    _cross $DESTDIR/libgcc1_*.deb $DESTDIR/libgcc1-dbg_*.deb
+    _repo_update
+}
+
+do_bs1_gcc() {
+    _do_gcc bootstrap
+}
+do_gcc() {
+    _do_gcc final
+}
+
+# stuff #
+
+run_action () {
+    echo "Running '$1'..."
+    if [ -z "$DEBUG" ] ; then
+        ( $1 ) > $LOG_BASE-$1.log 2>&1
+    else
+        ( $1 ) 2>&1 | tee $LOG_BASE-$1.log
+    fi
+    if [ $? -ne 0 ] ; then
+        echo "Action '$1' failed, see logs in '$LOG_BASE-$1.log'"
+        exit 1
+    fi
+}
+
+#
+# Script starts here
+#
+
+while true; do
+    case "$1" in
+        -Btarget)
+            BIN_INDEP_TARGET=1
+            shift;;
+        -Bhost)
+            BIN_INDEP_HOST=1
+            shift;;
+        --new=*)
+            NEW_PKG=${1#--new=}
+            shift;;
+        --)
+            shift
+            break;;
+        -*)
+            echo "Unexpected option: $1"
+            exit 1;;
+        *)
+            break;;
+    esac
+done
+
+if [ $# -lt 1 ] ; then
+    usage
+    exit 1
+fi
+
+TARGET=$1
+shift
+
+# vars=( BUILD_ARCH BUILD_ARCH_OS BUILD_ARCH_CPU BUILD_GNU_CPU BUILD_GNU_SYSTEM BUILD_GNU_TYPE \
+#        HOST_ARCH HOST_ARCH_OS HOST_ARCH_CPU HOST_GNU_CPU HOST_GNU_SYSTEM HOST_GNU_TYPE )
+# for i in ${vars[*]} ; do
+#     eval $i=$(dpkg-architecture -a$TARGET -qDEB_$i)
+# done
+
+HOST_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_TYPE)
+HOST_GNU_SYSTEM=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_SYSTEM)
+BUILD_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_BUILD_GNU_TYPE)
+
+# DEBPKG_HOST_GNU_TYPE=$(echo ${HOST_GNU_TYPE} | tr _ -)
+
+if [ "x${HOST_GNU_TYPE}" = "x${BUILD_GNU_TYPE}" ] ; then
+    echo "Host system type same as target: ${HOST_GNU_TYPE}"
+    echo "This should never happen. Ure are probably using wrong dpkg."
+    exit 1
+fi
+
+if [ $# -ne 0 ] ; then
+    ACTIONS=$@
+    # Explicit actions are performed no matter what
+    FORCED_ACTION="y"
+else
+    case "$HOST_GNU_SYSTEM" in
+        *uclibc*)
+            echo "uclibc is not supported yet."
+            ;;
+        *gnu*)
+            ;;
+        *)
+            echo "Unknown libc requested: $HOST_GNU_SYSTEM"
+            exit 1
+            ;;
+    esac
+
+    #
+    # List generation
+    #
+    ACTIONS="do_clean do_prepare"
+
+    # Build binutils/lld only if they are new
+    if [ $NEW_PKG = 'all' -o $NEW_PKG = 'binutils' ]; then
+        ACTIONS="$ACTIONS do_binutils"
+    fi
+    if [ $NEW_PKG = 'all' -o $NEW_PKG = 'linux-libc-dev' ]; then
+        ACTIONS="$ACTIONS do_lld"
+    fi
+    # Bootstrap gcc/glibc and build gcc no matter what
+    ACTIONS="$ACTIONS do_bs1_glibc do_bs1_gcc do_bs2_glibc do_gcc"
+    # Build glibc only if non -Bhost
+    if [ -z $BIN_INDEP_HOST ]; then
+        ACTIONS="$ACTIONS do_glibc"
+    fi
+fi
+
+
+# banner
+echo "Building cross toolchain packages"
+echo "---------------------------------"
+echo "Host architecture: $MYARCH"
+echo "Target architecture: $TARGET"
+echo "Actions: $ACTIONS"
+
+LOG_BASE=log
+
+for action in $ACTIONS ; do
+    run_action $action
+done
