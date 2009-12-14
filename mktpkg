@@ -20,14 +20,11 @@ usage() {
     echo
 }
 
-#
-# Distro
-#
+# Distro #
+
 DISTRO=zelazny
 
-#
-# -- Paths to sources --
-#
+# Paths to sources #
 
 SRC_DIR=$(pwd)
 BINUTILS_DIR=$SRC_DIR/binutils-host
@@ -186,17 +183,9 @@ fi
 TARGET=$1
 shift
 
-# vars=( BUILD_ARCH BUILD_ARCH_OS BUILD_ARCH_CPU BUILD_GNU_CPU BUILD_GNU_SYSTEM BUILD_GNU_TYPE \
-#        HOST_ARCH HOST_ARCH_OS HOST_ARCH_CPU HOST_GNU_CPU HOST_GNU_SYSTEM HOST_GNU_TYPE )
-# for i in ${vars[*]} ; do
-#     eval $i=$(dpkg-architecture -a$TARGET -qDEB_$i)
-# done
-
 HOST_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_TYPE)
 HOST_GNU_SYSTEM=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_SYSTEM)
 BUILD_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_BUILD_GNU_TYPE)
-
-# DEBPKG_HOST_GNU_TYPE=$(echo ${HOST_GNU_TYPE} | tr _ -)
 
 if [ "x${HOST_GNU_TYPE}" = "x${BUILD_GNU_TYPE}" ] ; then
     echo "Host system type same as target: ${HOST_GNU_TYPE}"
