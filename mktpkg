@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# IPlinux cross-toolchain builder
+# Quick and dirty IPlinux cross-toolchain builder
 #
 
 set -o pipefail
@@ -31,6 +31,7 @@ LLD_DIR=$SRC_DIR/linux-libc-dev
 UCLIBC_DIR=$SRC_DIR/uclibc
 GLIBC_DIR=$SRC_DIR/glibc
 GCC_DIR=$SRC_DIR/gcc-4.3
+TPKG_DIR=$SRC_DIR/toolchain-package
 
 MYARCH=$(dpkg --print-architecture)
 
@@ -170,6 +171,15 @@ do_gcc_install() {
 
 }
 
+do_tpkg() {
+    cd $TPKG_DIR
+    debian/source/prepare $TARGET 4.3
+    dpkg-buildpackage -us -uc -b
+}
+
+do_tpkg_install() {
+    $ROOTCMD dpkg -i ${TARGET}-cross-toolchain_*_all.deb
+}
 run_action () {
     echo "Running '$1'..."
     if [ -z "$DEBUG" ] ; then
