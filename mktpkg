@@ -4,17 +4,16 @@
 #
 
 set -o pipefail
-if [ -n "$DEBUG" ]; then
+if [ -n "$MKTPKG_DEBUG" ]; then
     set -x
 fi
 set -e
 
 usage() {
-    echo -e "Usage: $0 [-Btarget] [-Bhost] [--new=<pkg>] <target-arch> ..."
+    echo -e "Usage: $0 [-jN] [-d] <target-arch> [action [action]... ]"
     echo
-    echo -e "\t-Btarget          Build only arch-dep packages for target"
-    echo -e "\t-Bhost            Build only arch-dep packages for host"
-    echo -e "\t--new=<pkg>       Mark <pkg> as being new (does not need BinNMU bump)"
+    echo -e "\t-jN               Number of jobs allowed to be run simultaneously (BEWARE OF THE BROKEN PACKAGES!!!11)"
+    echo -e "\t-d                Show the build output"
     echo
     echo -e "\t<target-arch>     a Debian architecture string."
     echo
@@ -35,106 +34,141 @@ GCC_DIR=$SRC_DIR/gcc-4.3
 
 MYARCH=$(dpkg --print-architecture)
 
-DESTDIR=$HOME/__build/repo
-
-# tools #
+ROOTCMD=sudo
 
 do_clean() {
-    mkdir -p $DESTDIR
-    rm -f $DESTDIR/*
-    rm -f $SRC_DIR/*.dsc $SRC_DIR/*.tar.gz $SRC_DIR/*.log $SRC_DIR/log-*
-}
-
-do_prepare_pkg() {
-    (cd $1; \
-        DEBFULLNAME='IPlinux Build Robot' \
-        DEBEMAIL='build-robot@iplinux.org' \
-        dch --bin-nmu -D $DISTRO --force-distribution \
-        "Rebuild toolchain$2.")
+    rm -f $SRC_DIR/*.dsc $SRC_DIR/*.tar.gz $SRC_DIR/*.log $SRC_DIR/log-* $SRC_DIR/*.changes
+    rm -f $SRC_DIR/*_${TARGET}.deb $SRC_DIR/*-${TARGET}-cross_*_all.deb ${SRC_DIR}/*-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb
 }
 
 do_prepare() {
-    if [ "x$NEW_PKG" = all -o -z "$NEW_PKG" ]; then
-        UPD_MSG=''
-    else
-        UPD_MSG=' due to updated $NEW_PKG'
-    fi
-
-    if [ "x$NEW_PKG" != xgcc -a "x$NEW_PKG" != all ]; then
-        do_prepare_pkg "$GCC_DIR" "$UPD_MSG"
-    fi
-
-    if [ "x$NEW_PKG" != glibc -a "x$NEW_PKG" != all ]; then
-        do_prepare_pkg "$GLIBC_DIR" "$UPD_MSG"
-    fi
+    # Fetch the sources here.
+    echo "Prepare.. "
 }
 
 _cross() {
-    (cd $DESTDIR; dpkg-cross -A -a $TARGET -b "$@")
+    echo "Crossing $@ for $TARGET"
+
+    ( cd $SRC_DIR ; dpkg-cross -A -a $TARGET -b "$@" )
 }
 
-_repo_update() {
-    (cd $DESTDIR; dpkg-scanpackages . > Packages)
-}
-
-# binutils #
 
 do_binutils() {
-    (cd $BINUTILS_DIR; debian/source/prepare $TARGET)
-    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/binutils-host*dsc host $DESTDIR
-    _repo_update
+    cd $BINUTILS_DIR
+    ./debian/source/prepare $TARGET
+    # Does not work with $PARALLEL
+    dpkg-buildpackage -us -uc -b
 }
 
-# linux-libc-dev #
+do_binutils_install() {
+    $ROOTCMD dpkg -i binutils-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb
+}
+
 
 do_lld() {
-    (cd $SRC_DIR; dpkg-source -b linux-libc-dev)
-    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/linux-libc-dev_*.dsc target:$TARGET $DESTDIR
-    _cross $DESTDIR/linux-libc-dev_*.deb
-    _repo_update
+    ( cd $LLD_DIR
+    dpkg-buildpackage -uc -us -b -a${TARGET} ${PARALLEL} )
+    _cross linux-libc-dev_*_${TARGET}.deb
 }
 
-# glibc #
-
-_do_glibc() {
-    (cd $GLIBC_DIR; debian/source/prepare $1)
-    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/glibc*dsc target:$TARGET $DESTDIR
+do_lld_install() {
+    $ROOTCMD dpkg -i linux-libc-dev-${TARGET}-cross_*_all.deb
 }
 
 do_bs1_glibc() {
-    _do_glibc dev-headers
-    _cross $DESTDIR/libc6-dev-headers_*.deb
-    _repo_update
+    ( cd $GLIBC_DIR
+    debian/source/prepare dev-headers
+    dpkg-buildpackage -uc -us -b -a${TARGET} ${PARALLEL})
+
+    _cross libc6-dev-headers_*_${TARGET}.deb
 }
+
+do_bs1_glibc_install() {
+    $ROOTCMD dpkg -i libc6-dev-headers-${TARGET}-cross_*_all.deb
+}
+
+do_bs1_glibc_remove() {
+    $ROOTCMD dpkg -r libc6-dev-headers-${TARGET}-cross
+}
+
 do_bs2_glibc() {
-    _do_glibc bootstrap
-    _cross $DESTDIR/libc6_*.deb $DESTDIR/libc6-dev_*.deb
-    _repo_update
+    ( cd $GLIBC_DIR
+    debian/source/prepare bootstrap
+    dpkg-buildpackage -uc -us -b -a${TARGET} ${PARALLEL} )
+
+    _cross libc6-dev_*_${TARGET}.deb
+    _cross libc6_*_${TARGET}.deb
+}
+
+do_bs2_glibc_install() {
+    $ROOTCMD dpkg -i libc6-dev-${TARGET}-cross_*_all.deb libc6-${TARGET}-cross_*_all.deb
 }
 
 do_glibc() {
-    _do_glibc final
-    _cross $DESTDIR/gconv-data-*.deb $DESTDIR/libc6-dbg_*.deb $DESTDIR/libc6-dev_*.deb $DESTDIR/libc6-iconv_*.deb $DESTDIR/libc6-rpc_*.deb $DESTDIR/libc6-tz_*.deb $DESTDIR/libc6-utils_*.deb $DESTDIR/libc6_*.deb $DESTDIR/locales_*.deb
-    _repo_update
+    ( cd $GLIBC_DIR
+    debian/source/prepare final
+    dpkg-buildpackage -uc -us -b -a${TARGET} ${PARALLEL})
+
+    _cross gconv-data-basic_*_${TARGET}.deb
+    _cross gconv-data-ebcdic_*_${TARGET}.deb
+    _cross gconv-data-oriental_*_${TARGET}.deb
+    _cross libc6-dbg_*_${TARGET}.deb
+    _cross libc6-dev_*_${TARGET}.deb
+    _cross libc6-iconv_*_${TARGET}.deb
+    _cross libc6-rpc_*_${TARGET}.deb
+    _cross libc6-tz_*_${TARGET}.deb
+    _cross libc6-utils_*_${TARGET}.deb
+    _cross libc6_*_${TARGET}.deb
+    _cross locales_*_all.deb
 }
 
-# gcc #
-
-_do_gcc() {
-    (cd $GCC_DIR; debian/source/prepare $TARGET $1)
-    ubuild iplinux-$MYARCH-$DISTRO $SRC_DIR/gcc-*_*.dsc host $DESTDIR
-    _cross $DESTDIR/libgcc1_*.deb $DESTDIR/libgcc1-dbg_*.deb
-    _repo_update
+do_glibc_install() {
+    $ROOTCMD dpkg -i gconv-data-basic-${TARGET}-cross_*_all.deb \
+            gconv-data-ebcdic-${TARGET}-cross_*_all.deb \
+            gconv-data-oriental-${TARGET}-cross_*_all.deb \
+            libc6-dbg-${TARGET}-cross_*_all.deb \
+            libc6-dev-${TARGET}-cross_*_all.deb \
+            libc6-iconv-${TARGET}-cross_*_all.deb \
+            libc6-rpc-${TARGET}-cross_*_all.deb \
+            libc6-tz-${TARGET}-cross_*_all.deb \
+            libc6-utils-${TARGET}-cross_*_all.deb \
+            libc6-${TARGET}-cross_*_all.deb \
+            locales-${TARGET}-cross_*_all.deb
 }
+
 
 do_bs1_gcc() {
-    _do_gcc bootstrap
-}
-do_gcc() {
-    _do_gcc final
+    ( cd $GCC_DIR
+    debian/source/prepare $TARGET bootstrap
+    dpkg-buildpackage -us -uc -b $PARALLEL )
+
+    _cross libgcc1_*_${TARGET}.deb
 }
 
-# stuff #
+do_bs1_gcc_install() {
+    $ROOTCMD dpkg -i cpp-4.3-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb \
+            gcc-4.3-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb \
+            libgcc1-${TARGET}-cross_*_all.deb
+}
+
+do_gcc() {
+    ( cd $GCC_DIR
+    debian/source/prepare $TARGET final
+    dpkg-buildpackage -us -uc -b $PARALLEL )
+    _cross libstdc++6_*_${TARGET}.deb
+    _cross libgcc1_*_${TARGET}.deb
+    _cross libstdc++6-4.3-dev_*_${TARGET}.deb
+}
+
+do_gcc_install() {
+    $ROOTCMD dpkg -i cpp-4.3-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb \
+            g++-4.3-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb \
+            gcc-4.3-${PKG_HOST_GNU_TARGET}_*_${MYARCH}.deb \
+            libgcc1-${TARGET}-cross_*_all.deb \
+            libstdc++6-4.3-dev-${TARGET}-cross_*_all.deb \
+            libstdc++6-${TARGET}-cross_*_all.deb
+
+}
 
 run_action () {
     echo "Running '$1'..."
@@ -155,14 +189,11 @@ run_action () {
 
 while true; do
     case "$1" in
-        -Btarget)
-            BIN_INDEP_TARGET=1
+        -j*)
+            PARALLEL=$1
             shift;;
-        -Bhost)
-            BIN_INDEP_HOST=1
-            shift;;
-        --new=*)
-            NEW_PKG=${1#--new=}
+        -d)
+            DEBUG=$1
             shift;;
         --)
             shift
@@ -187,6 +218,9 @@ HOST_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_TYPE)
 HOST_GNU_SYSTEM=$(dpkg-architecture -a$TARGET -qDEB_HOST_GNU_SYSTEM)
 BUILD_GNU_TYPE=$(dpkg-architecture -a$TARGET -qDEB_BUILD_GNU_TYPE)
 
+PKG_HOST_GNU_TARGET=`echo ${HOST_GNU_TYPE} | sed -e 's/_/-/g'`
+
+
 if [ "x${HOST_GNU_TYPE}" = "x${BUILD_GNU_TYPE}" ] ; then
     echo "Host system type same as target: ${HOST_GNU_TYPE}"
     echo "This should never happen. Ure are probably using wrong dpkg."
@@ -195,14 +229,17 @@ fi
 
 if [ $# -ne 0 ] ; then
     ACTIONS=$@
-    # Explicit actions are performed no matter what
-    FORCED_ACTION="y"
 else
     case "$HOST_GNU_SYSTEM" in
         *uclibc*)
             echo "uclibc is not supported yet."
             ;;
         *gnu*)
+            ACTIONS="do_clean do_prepare do_binutils do_binutils_install \
+                     do_lld do_lld_install do_bs1_glibc do_bs1_glibc_install \
+                     do_bs1_gcc do_bs1_gcc_install do_bs1_glibc_remove \
+                     do_bs2_glibc do_bs2_glibc_install do_gcc do_gcc_install \
+                     do_glibc do_glibc_install"
             ;;
         *)
             echo "Unknown libc requested: $HOST_GNU_SYSTEM"
@@ -210,24 +247,6 @@ else
             ;;
     esac
 
-    #
-    # List generation
-    #
-    ACTIONS="do_clean do_prepare"
-
-    # Build binutils/lld only if they are new
-    if [ $NEW_PKG = 'all' -o $NEW_PKG = 'binutils' ]; then
-        ACTIONS="$ACTIONS do_binutils"
-    fi
-    if [ $NEW_PKG = 'all' -o $NEW_PKG = 'linux-libc-dev' ]; then
-        ACTIONS="$ACTIONS do_lld"
-    fi
-    # Bootstrap gcc/glibc and build gcc no matter what
-    ACTIONS="$ACTIONS do_bs1_glibc do_bs1_gcc do_bs2_glibc do_gcc"
-    # Build glibc only if non -Bhost
-    if [ -z $BIN_INDEP_HOST ]; then
-        ACTIONS="$ACTIONS do_glibc"
-    fi
 fi
 
 
