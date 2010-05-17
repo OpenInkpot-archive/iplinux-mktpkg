@@ -242,7 +242,7 @@ if [ $# -ne 0 ] ; then
 else
     case "$HOST_GNU_SYSTEM" in
         *uclibc*)
-            echo "uclibc is not supported yet."
+            echo "uClibc support is coming soon!"
             ;;
         *gnu*)
             ACTIONS="do_clean do_prepare do_binutils do_binutils_install \
